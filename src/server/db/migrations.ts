@@ -365,6 +365,65 @@ const migrations: Migration[] = [
       );
     `,
   },
+  {
+    version: '002',
+    name: 'legal_documents_and_versions',
+    sql: `
+      CREATE TABLE IF NOT EXISTS legal_documents (
+        key TEXT PRIMARY KEY,
+        slug TEXT NOT NULL UNIQUE,
+        tab_label TEXT NOT NULL,
+        title TEXT NOT NULL,
+        subtitle TEXT NOT NULL,
+        version TEXT NOT NULL DEFAULT '1.0-draft',
+        status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'PUBLISHED')),
+        legal_review_notice TEXT NOT NULL,
+        published_at TEXT,
+        last_updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        sections_json TEXT NOT NULL,
+        draft_title TEXT NOT NULL,
+        draft_subtitle TEXT NOT NULL,
+        draft_version TEXT NOT NULL DEFAULT '1.0-draft',
+        draft_legal_review_notice TEXT NOT NULL,
+        draft_sections_json TEXT NOT NULL,
+        updated_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+        sort_order INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE IF NOT EXISTS legal_document_versions (
+        id TEXT PRIMARY KEY,
+        document_key TEXT NOT NULL REFERENCES legal_documents(key) ON DELETE CASCADE,
+        version TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('DRAFT', 'PUBLISHED')),
+        title TEXT NOT NULL,
+        subtitle TEXT NOT NULL,
+        legal_review_notice TEXT NOT NULL,
+        sections_json TEXT NOT NULL,
+        change_note TEXT,
+        created_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+        created_by_email TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_legal_ver_key ON legal_document_versions(document_key, created_at);
+
+      CREATE TABLE IF NOT EXISTS legal_acceptances (
+        id TEXT PRIMARY KEY,
+        user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+        user_email TEXT,
+        organization_name TEXT,
+        application_id TEXT REFERENCES partner_applications(id) ON DELETE SET NULL,
+        document_key TEXT NOT NULL REFERENCES legal_documents(key) ON DELETE CASCADE,
+        document_version TEXT NOT NULL,
+        context TEXT NOT NULL,
+        ip_address TEXT,
+        user_agent TEXT,
+        accepted_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_legal_acc_doc ON legal_acceptances(document_key, accepted_at);
+    `,
+  },
 ];
 
 export function runMigrations(): void {

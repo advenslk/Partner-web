@@ -112,12 +112,17 @@ export function RegisterPage() {
     organizationType: 'Technology Company',
     country: '',
   });
+  const [acceptedPolicies, setAcceptedPolicies] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [verifyHint, setVerifyHint] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!acceptedPolicies) {
+      setErrorMsg('Please confirm that you have reviewed the Privacy Policy and Terms of Service.');
+      return;
+    }
     setLoading(true);
     setErrorMsg('');
     try {
@@ -236,6 +241,26 @@ export function RegisterPage() {
                   />
                 </div>
               </div>
+
+              <label className="flex items-start gap-2.5 text-xs text-[#4A504C] cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={acceptedPolicies}
+                  onChange={(e) => setAcceptedPolicies(e.target.checked)}
+                  className="mt-0.5"
+                />
+                <span>
+                  I acknowledge the{' '}
+                  <Link to="/legal/privacy" target="_blank" className="underline font-semibold text-[#111312]">
+                    Privacy Policy
+                  </Link>{' '}
+                  and{' '}
+                  <Link to="/legal/terms" target="_blank" className="underline font-semibold text-[#111312]">
+                    Terms of Service
+                  </Link>{' '}
+                  governing HelzerX Partner Portal accounts.
+                </span>
+              </label>
 
               <button
                 type="submit"

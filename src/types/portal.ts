@@ -94,11 +94,35 @@ export interface CaseStudyTemplate {
   image: string;
 }
 
-export interface LegalDoc {
+export interface LegalSubsection {
+  number: string;
   title: string;
+  paragraphs: string[];
+  bullets?: string[];
+}
+
+export interface LegalSection {
+  id: string;
+  number: string;
+  title: string;
+  paragraphs: string[];
+  bullets?: string[];
+  subsections?: LegalSubsection[];
+}
+
+export interface LegalDoc {
+  key: string;
+  slug: string;
+  tabLabel: string;
+  title: string;
+  subtitle: string;
+  version: string;
+  status: 'DRAFT' | 'PUBLISHED';
   isDraft: boolean;
-  lastReviewedBy: string;
-  body: string;
+  legalReviewNotice: string;
+  publishedAt: string | null;
+  lastUpdatedAt: string;
+  sections: LegalSection[];
 }
 
 export interface BootstrapData {

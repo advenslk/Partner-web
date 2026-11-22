@@ -10,6 +10,8 @@ import {
 } from '../middleware/security.ts';
 import { renderTemplate, sendBrandedEmail } from '../services/email.ts';
 import { privateDocumentUpload } from '../services/upload.ts';
+import { streamLegalDocumentPdf } from '../services/legalPdf.ts';
+import type { LegalSection } from '../db/legalSeedData.ts';
 
 const router = Router();
 
@@ -32,14 +34,51 @@ router.get('/bootstrap', (_req, res) => {
   }>;
 
   const content: Record<string, unknown> = {};
-  const legal: Record<string, unknown> = {};
   for (const row of contentRows) {
-    const parsed = parseJsonSafe(row.content_json, {});
-    if (row.section === 'legal') {
-      legal[row.key] = { title: row.title, ...(parsed as object) };
-    } else {
-      content[row.key] = parsed;
+    if (row.section !== 'legal') {
+      content[row.key] = parseJsonSafe(row.content_json, {});
     }
+  }
+
+  const legalRows = db
+    .prepare(
+      `
+      SELECT key, slug, tab_label, title, subtitle, version, status, legal_review_notice,
+             published_at, last_updated_at, sections_json
+      FROM legal_documents
+      ORDER BY sort_order ASC
+    `
+    )
+    .all() as Array<{
+    key: string;
+    slug: string;
+    tab_label: string;
+    title: string;
+    subtitle: string;
+    version: string;
+    status: 'DRAFT' | 'PUBLISHED';
+    legal_review_notice: string;
+    published_at: string | null;
+    last_updated_at: string;
+    sections_json: string;
+  }>;
+
+  const legal: Record<string, unknown> = {};
+  for (const row of legalRows) {
+    legal[row.key] = {
+      key: row.key,
+      slug: row.slug,
+      tabLabel: row.tab_label,
+      title: row.title,
+      subtitle: row.subtitle,
+      version: row.version,
+      status: row.status,
+      isDraft: row.status === 'DRAFT',
+      legalReviewNotice: row.legal_review_notice,
+      publishedAt: row.published_at,
+      lastUpdatedAt: row.last_updated_at,
+      sections: parseJsonSafe<LegalSection[]>(row.sections_json, []),
+    };
   }
 
   const partnershipTypes = (
@@ -334,6 +373,31 @@ router.post(
           `Your ${typeExists.name} proposal for ${d.organizationName} has been received.`
         );
       }
+
+      const legalVersions = db
+        .prepare(`SELECT key, version FROM legal_documents WHERE key IN ('legal_privacy', 'legal_terms', 'legal_partnership_terms')`)
+        .all() as Array<{ key: string; version: string }>;
+      const acceptStmt = db.prepare(
+        `
+        INSERT INTO legal_acceptances (id, user_id, user_email, organization_name, application_id, document_key, document_version, context, ip_address, user_agent)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'PARTNERSHIP_APPLICATION', ?, ?)
+      `
+      );
+      const clientIp = getClientIp(req);
+      const userAgent = String(req.headers['user-agent'] || '').slice(0, 250);
+      for (const lv of legalVersions) {
+        acceptStmt.run(
+          crypto.randomUUID(),
+          linkedUserId,
+          normalizedEmail,
+          d.organizationName,
+          appId,
+          lv.key,
+          lv.version,
+          clientIp,
+          userAgent
+        );
+      }
     });
 
     const rendered = renderTemplate('application_confirmation', {
@@ -448,6 +512,119 @@ router.post('/contact', rateLimit(10, 15 * 60 * 1000), (req: AuthedRequest, res)
   });
 
   res.status(201).json({ message: 'Your inquiry has been received by HelzerX Technologies.' });
+});
+
+router.get('/legal/:slug/pdf', (req, res) => {
+  const db = getDb();
+  const row = db
+    .prepare(
+      `
+      SELECT slug, title, subtitle, version, status, legal_review_notice, published_at, last_updated_at, sections_json
+      FROM legal_documents
+      WHERE slug = ? OR key = ?
+    `
+    )
+    .get(req.params.slug, req.params.slug) as
+    | {
+        slug: string;
+        title: string;
+        subtitle: string;
+        version: string;
+        status: string;
+        legal_review_notice: string;
+        published_at: string | null;
+        last_updated_at: string;
+        sections_json: string;
+      }
+    | undefined;
+
+  if (!row) {
+    res.status(404).json({ error: 'Legal document not found.' });
+    return;
+  }
+
+  const sections = parseJsonSafe<LegalSection[]>(row.sections_json, []);
+  streamLegalDocumentPdf(
+    {
+      slug: row.slug,
+      title: row.title,
+      subtitle: row.subtitle,
+      version: row.version,
+      status: row.status,
+      legalReviewNotice: row.legal_review_notice,
+      publishedAt: row.published_at,
+      lastUpdatedAt: row.last_updated_at,
+      sections,
+    },
+    res
+  );
+});
+
+router.post('/legal/:slug/accept', rateLimit(30, 15 * 60 * 1000), (req: AuthedRequest, res) => {
+  const schema = z.object({
+    email: z.string().trim().email().max(180).optional(),
+    organizationName: z.string().trim().max(180).optional(),
+    context: z.string().trim().min(2).max(80).optional(),
+  });
+  const parsed = schema.safeParse(req.body || {});
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Please provide a valid email address if entering one manually.' });
+    return;
+  }
+
+  const db = getDb();
+  const doc = db
+    .prepare('SELECT key, slug, title, version FROM legal_documents WHERE slug = ? OR key = ?')
+    .get(req.params.slug, req.params.slug) as
+    | { key: string; slug: string; title: string; version: string }
+    | undefined;
+
+  if (!doc) {
+    res.status(404).json({ error: 'Legal document not found.' });
+    return;
+  }
+
+  const effectiveEmail = (parsed.data.email || req.authUser?.email || '').toLowerCase() || null;
+  if (!req.authUser && !effectiveEmail) {
+    res.status(400).json({ error: 'Please sign in or provide a business email to record your acknowledgment.' });
+    return;
+  }
+
+  const id = crypto.randomUUID();
+  const context = parsed.data.context || 'LEGAL_PORTAL_ACKNOWLEDGMENT';
+  db.prepare(
+    `
+    INSERT INTO legal_acceptances (id, user_id, user_email, organization_name, document_key, document_version, context, ip_address, user_agent)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `
+  ).run(
+    id,
+    req.authUser?.id || null,
+    effectiveEmail,
+    parsed.data.organizationName || null,
+    doc.key,
+    doc.version,
+    context,
+    getClientIp(req),
+    String(req.headers['user-agent'] || '').slice(0, 250)
+  );
+
+  writeAuditLog({
+    actorUserId: req.authUser?.id || null,
+    actorEmail: effectiveEmail,
+    action: 'LEGAL_POLICY_ACCEPTED',
+    entityType: 'legal_document',
+    entityId: doc.key,
+    details: { version: doc.version, context },
+    ipAddress: getClientIp(req),
+  });
+
+  res.status(201).json({
+    message: `Acknowledgment recorded for ${doc.title} (Version ${doc.version}).`,
+    acceptanceId: id,
+    documentKey: doc.key,
+    version: doc.version,
+  });
 });
 
 export default router;

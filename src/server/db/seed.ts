@@ -1,13 +1,79 @@
 import crypto from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import { getDb, withTransaction } from './database.ts';
+import { SEED_LEGAL_DOCUMENTS } from './legalSeedData.ts';
 
 function uuid(): string {
   return crypto.randomUUID();
 }
 
+export function ensureLegalDocumentsSeeded(): void {
+  const db = getDb();
+  const countRow = db.prepare('SELECT COUNT(*) as count FROM legal_documents').get() as {
+    count: number;
+  };
+  if (countRow.count >= SEED_LEGAL_DOCUMENTS.length) {
+    return;
+  }
+
+  withTransaction(() => {
+    const upsertDoc = db.prepare(`
+      INSERT INTO legal_documents (
+        key, slug, tab_label, title, subtitle, version, status, legal_review_notice,
+        published_at, last_updated_at, sections_json,
+        draft_title, draft_subtitle, draft_version, draft_legal_review_notice, draft_sections_json,
+        sort_order
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, datetime('now'), ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(key) DO NOTHING
+    `);
+
+    const insertVer = db.prepare(`
+      INSERT INTO legal_document_versions (
+        id, document_key, version, status, title, subtitle, legal_review_notice, sections_json, change_note, created_by_email
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    for (const doc of SEED_LEGAL_DOCUMENTS) {
+      const sectionsJson = JSON.stringify(doc.sections);
+      const info = upsertDoc.run(
+        doc.key,
+        doc.slug,
+        doc.tabLabel,
+        doc.title,
+        doc.subtitle,
+        doc.version,
+        doc.status,
+        doc.legalReviewNotice,
+        sectionsJson,
+        doc.title,
+        doc.subtitle,
+        doc.version,
+        doc.legalReviewNotice,
+        sectionsJson,
+        doc.sortOrder
+      );
+
+      if (info.changes > 0) {
+        insertVer.run(
+          uuid(),
+          doc.key,
+          doc.version,
+          doc.status,
+          doc.title,
+          doc.subtitle,
+          doc.legalReviewNotice,
+          sectionsJson,
+          'Initial structured corporate legal draft created.',
+          'system@helzerx.com'
+        );
+      }
+    }
+  });
+}
+
 export function seedDatabaseIfEmpty(): void {
   const db = getDb();
+  ensureLegalDocumentsSeeded();
 
   const existingTypes = db.prepare('SELECT COUNT(*) as count FROM partnership_types').get() as {
     count: number;

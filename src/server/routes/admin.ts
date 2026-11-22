@@ -1132,4 +1132,368 @@ router.put('/settings', requireRole(['SUPER_ADMIN', 'ADMIN']), (req: AuthedReque
   res.json({ message: 'System settings saved.' });
 });
 
+// Legal Documentation Management (Drafts, Publishing, Version History & Acceptances)
+const legalSubsectionSchema = z.object({
+  number: z.string().trim().min(1).max(30),
+  title: z.string().trim().min(1).max(200),
+  paragraphs: z.array(z.string().trim().min(1)).default([]),
+  bullets: z.array(z.string().trim().min(1)).optional(),
+});
+
+const legalSectionSchema = z.object({
+  id: z.string().trim().min(1).max(80),
+  number: z.string().trim().min(1).max(30),
+  title: z.string().trim().min(1).max(200),
+  paragraphs: z.array(z.string().trim().min(1)).default([]),
+  bullets: z.array(z.string().trim().min(1)).optional(),
+  subsections: z.array(legalSubsectionSchema).optional(),
+});
+
+const legalDocumentEditSchema = z.object({
+  title: z.string().trim().min(2).max(200),
+  subtitle: z.string().trim().min(5).max(1000),
+  version: z.string().trim().min(1).max(40),
+  legalReviewNotice: z.string().trim().min(5).max(2000),
+  sections: z.array(legalSectionSchema).min(1),
+  changeNote: z.string().trim().max(500).optional().default(''),
+});
+
+router.get('/legal', (_req: AuthedRequest, res) => {
+  const db = getDb();
+  const documents = db
+    .prepare(`SELECT * FROM legal_documents ORDER BY sort_order ASC`)
+    .all();
+  const versions = db
+    .prepare(
+      `SELECT id, document_key, version, status, title, subtitle, legal_review_notice, sections_json, change_note, created_by_email, created_at
+       FROM legal_document_versions
+       ORDER BY created_at DESC`
+    )
+    .all();
+  const acceptances = db
+    .prepare(
+      `SELECT la.*, ld.title as document_title
+       FROM legal_acceptances la
+       JOIN legal_documents ld ON ld.key = la.document_key
+       ORDER BY la.accepted_at DESC
+       LIMIT 100`
+    )
+    .all();
+  res.json({ documents, versions, acceptances });
+});
+
+router.put(
+  '/legal/:key/draft',
+  requireRole(['SUPER_ADMIN', 'ADMIN', 'PARTNERSHIP_MANAGER']),
+  (req: AuthedRequest, res) => {
+    if (!req.authUser) return;
+    const parsed = legalDocumentEditSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: 'Invalid legal document draft payload.', details: parsed.error.flatten() });
+      return;
+    }
+
+    const db = getDb();
+    const existing = db
+      .prepare('SELECT key, status FROM legal_documents WHERE key = ?')
+      .get(req.params.key) as { key: string; status: 'DRAFT' | 'PUBLISHED' } | undefined;
+
+    if (!existing) {
+      res.status(404).json({ error: 'Legal document not found.' });
+      return;
+    }
+
+    const d = parsed.data;
+    const serializedSections = JSON.stringify(d.sections);
+
+    withTransaction(() => {
+      if (existing.status === 'DRAFT') {
+        db.prepare(
+          `
+          UPDATE legal_documents SET
+            title = ?,
+            subtitle = ?,
+            version = ?,
+            legal_review_notice = ?,
+            sections_json = ?,
+            draft_title = ?,
+            draft_subtitle = ?,
+            draft_version = ?,
+            draft_legal_review_notice = ?,
+            draft_sections_json = ?,
+            last_updated_at = datetime('now'),
+            updated_by_user_id = ?
+          WHERE key = ?
+        `
+        ).run(
+          d.title,
+          d.subtitle,
+          d.version,
+          d.legalReviewNotice,
+          serializedSections,
+          d.title,
+          d.subtitle,
+          d.version,
+          d.legalReviewNotice,
+          serializedSections,
+          req.authUser!.id,
+          existing.key
+        );
+      } else {
+        db.prepare(
+          `
+          UPDATE legal_documents SET
+            draft_title = ?,
+            draft_subtitle = ?,
+            draft_version = ?,
+            draft_legal_review_notice = ?,
+            draft_sections_json = ?,
+            updated_by_user_id = ?
+          WHERE key = ?
+        `
+        ).run(
+          d.title,
+          d.subtitle,
+          d.version,
+          d.legalReviewNotice,
+          serializedSections,
+          req.authUser!.id,
+          existing.key
+        );
+      }
+
+      db.prepare(
+        `
+        INSERT INTO legal_document_versions (
+          id, document_key, version, status, title, subtitle, legal_review_notice, sections_json, change_note, created_by_user_id, created_by_email
+        ) VALUES (?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?, ?, ?)
+      `
+      ).run(
+        crypto.randomUUID(),
+        existing.key,
+        d.version,
+        d.title,
+        d.subtitle,
+        d.legalReviewNotice,
+        serializedSections,
+        d.changeNote || 'Saved draft revision.',
+        req.authUser!.id,
+        req.authUser!.email
+      );
+    });
+
+    writeAuditLog({
+      actorUserId: req.authUser.id,
+      actorEmail: req.authUser.email,
+      action: 'LEGAL_DRAFT_SAVED',
+      entityType: 'legal_document',
+      entityId: existing.key,
+      details: { version: d.version, changeNote: d.changeNote || undefined },
+      ipAddress: getClientIp(req),
+    });
+
+    res.json({ message: 'Legal document draft saved and added to version history.' });
+  }
+);
+
+router.post(
+  '/legal/:key/publish',
+  requireRole(['SUPER_ADMIN', 'ADMIN']),
+  (req: AuthedRequest, res) => {
+    if (!req.authUser) return;
+    const db = getDb();
+    const existing = db
+      .prepare('SELECT * FROM legal_documents WHERE key = ?')
+      .get(req.params.key) as
+      | {
+          key: string;
+          draft_title: string;
+          draft_subtitle: string;
+          draft_version: string;
+          draft_legal_review_notice: string;
+          draft_sections_json: string;
+        }
+      | undefined;
+
+    if (!existing) {
+      res.status(404).json({ error: 'Legal document not found.' });
+      return;
+    }
+
+    let pubTitle = existing.draft_title;
+    let pubSubtitle = existing.draft_subtitle;
+    let pubVersion = existing.draft_version;
+    let pubNotice = existing.draft_legal_review_notice;
+    let pubSectionsJson = existing.draft_sections_json;
+    let changeNote = String(req.body?.changeNote || '').trim() || 'Published legal document.';
+
+    if (req.body && req.body.sections) {
+      const parsed = legalDocumentEditSchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Invalid legal document publish payload.', details: parsed.error.flatten() });
+        return;
+      }
+      pubTitle = parsed.data.title;
+      pubSubtitle = parsed.data.subtitle;
+      pubVersion = parsed.data.version;
+      pubNotice = parsed.data.legalReviewNotice;
+      pubSectionsJson = JSON.stringify(parsed.data.sections);
+      if (parsed.data.changeNote) changeNote = parsed.data.changeNote;
+    }
+
+    withTransaction(() => {
+      db.prepare(
+        `
+        UPDATE legal_documents SET
+          title = ?,
+          subtitle = ?,
+          version = ?,
+          status = 'PUBLISHED',
+          legal_review_notice = ?,
+          sections_json = ?,
+          draft_title = ?,
+          draft_subtitle = ?,
+          draft_version = ?,
+          draft_legal_review_notice = ?,
+          draft_sections_json = ?,
+          published_at = COALESCE(published_at, datetime('now')),
+          last_updated_at = datetime('now'),
+          updated_by_user_id = ?
+        WHERE key = ?
+      `
+      ).run(
+        pubTitle,
+        pubSubtitle,
+        pubVersion,
+        pubNotice,
+        pubSectionsJson,
+        pubTitle,
+        pubSubtitle,
+        pubVersion,
+        pubNotice,
+        pubSectionsJson,
+        req.authUser!.id,
+        existing.key
+      );
+
+      db.prepare(
+        `
+        INSERT INTO legal_document_versions (
+          id, document_key, version, status, title, subtitle, legal_review_notice, sections_json, change_note, created_by_user_id, created_by_email
+        ) VALUES (?, ?, ?, 'PUBLISHED', ?, ?, ?, ?, ?, ?, ?)
+      `
+      ).run(
+        crypto.randomUUID(),
+        existing.key,
+        pubVersion,
+        pubTitle,
+        pubSubtitle,
+        pubNotice,
+        pubSectionsJson,
+        changeNote,
+        req.authUser!.id,
+        req.authUser!.email
+      );
+    });
+
+    writeAuditLog({
+      actorUserId: req.authUser.id,
+      actorEmail: req.authUser.email,
+      action: 'LEGAL_DOCUMENT_PUBLISHED',
+      entityType: 'legal_document',
+      entityId: existing.key,
+      details: { version: pubVersion, changeNote },
+      ipAddress: getClientIp(req),
+    });
+
+    res.json({ message: 'Legal document published successfully.' });
+  }
+);
+
+router.post(
+  '/legal/:key/restore/:versionId',
+  requireRole(['SUPER_ADMIN', 'ADMIN', 'PARTNERSHIP_MANAGER']),
+  (req: AuthedRequest, res) => {
+    if (!req.authUser) return;
+    const db = getDb();
+    const doc = db
+      .prepare('SELECT key, status FROM legal_documents WHERE key = ?')
+      .get(req.params.key) as { key: string; status: 'DRAFT' | 'PUBLISHED' } | undefined;
+    const ver = db
+      .prepare('SELECT * FROM legal_document_versions WHERE id = ? AND document_key = ?')
+      .get(req.params.versionId, req.params.key) as
+      | {
+          id: string;
+          version: string;
+          title: string;
+          subtitle: string;
+          legal_review_notice: string;
+          sections_json: string;
+        }
+      | undefined;
+
+    if (!doc || !ver) {
+      res.status(404).json({ error: 'Legal document or historical version not found.' });
+      return;
+    }
+
+    withTransaction(() => {
+      if (doc.status === 'DRAFT') {
+        db.prepare(
+          `
+          UPDATE legal_documents SET
+            title = ?, subtitle = ?, version = ?, legal_review_notice = ?, sections_json = ?,
+            draft_title = ?, draft_subtitle = ?, draft_version = ?, draft_legal_review_notice = ?, draft_sections_json = ?,
+            last_updated_at = datetime('now'),
+            updated_by_user_id = ?
+          WHERE key = ?
+        `
+        ).run(
+          ver.title,
+          ver.subtitle,
+          ver.version,
+          ver.legal_review_notice,
+          ver.sections_json,
+          ver.title,
+          ver.subtitle,
+          ver.version,
+          ver.legal_review_notice,
+          ver.sections_json,
+          req.authUser!.id,
+          doc.key
+        );
+      } else {
+        db.prepare(
+          `
+          UPDATE legal_documents SET
+            draft_title = ?, draft_subtitle = ?, draft_version = ?, draft_legal_review_notice = ?, draft_sections_json = ?,
+            updated_by_user_id = ?
+          WHERE key = ?
+        `
+        ).run(
+          ver.title,
+          ver.subtitle,
+          ver.version,
+          ver.legal_review_notice,
+          ver.sections_json,
+          req.authUser!.id,
+          doc.key
+        );
+      }
+    });
+
+    writeAuditLog({
+      actorUserId: req.authUser.id,
+      actorEmail: req.authUser.email,
+      action: 'LEGAL_VERSION_RESTORED_TO_DRAFT',
+      entityType: 'legal_document',
+      entityId: doc.key,
+      details: { restoredVersionId: ver.id, version: ver.version },
+      ipAddress: getClientIp(req),
+    });
+
+    res.json({ message: `Version ${ver.version} loaded into editor draft.` });
+  }
+);
+
 export default router;

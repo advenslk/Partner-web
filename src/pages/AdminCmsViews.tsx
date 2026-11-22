@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { CheckCircle2, Plus, Trash2 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
+import { AdminLegalEditor } from './AdminLegalEditor';
 
 interface CmsResponse {
   content: Array<{ key: string; section: string; title: string; content_json: string; updated_at: string }>;
@@ -44,6 +45,7 @@ interface CmsResponse {
 
 export function AdminContentManagerView() {
   const { apiFetch, refreshBootstrap } = useApp();
+  const [sectionTab, setSectionTab] = useState<'website' | 'legal'>('legal');
   const [cms, setCms] = useState<CmsResponse | null>(null);
   const [selectedKey, setSelectedKey] = useState('hero');
   const [editorJson, setEditorJson] = useState('');
@@ -58,7 +60,8 @@ export function AdminContentManagerView() {
   const load = useCallback(async () => {
     const res = await apiFetch<CmsResponse>('/api/admin/cms');
     setCms(res);
-    const active = res.content.find((c) => c.key === selectedKey) || res.content[0];
+    const generalContent = res.content.filter((c) => c.section !== 'legal');
+    const active = generalContent.find((c) => c.key === selectedKey) || generalContent[0];
     if (active) {
       setEditorTitle(active.title);
       try {
@@ -121,45 +124,72 @@ export function AdminContentManagerView() {
 
   if (!cms) return <div className="p-6 text-sm text-[#5A605C]">Loading CMS...</div>;
 
+  const generalContent = cms.content.filter((c) => c.section !== 'legal');
+
   return (
     <div className="space-y-8">
-      {msg && (
-        <div className="p-3.5 rounded-xl bg-[#E9FAD6] text-[#1D5610] text-xs font-medium flex items-center gap-2">
-          <CheckCircle2 className="w-4 h-4" />
-          <span>{msg}</span>
-        </div>
-      )}
-      {err && <div className="p-3.5 rounded-xl bg-red-50 text-red-700 text-xs">{err}</div>}
+      <div className="flex flex-wrap items-center gap-2 border-b border-[#E6E8E6] pb-3">
+        <button
+          type="button"
+          onClick={() => setSectionTab('legal')}
+          className={`px-4 py-2 rounded-full text-xs font-semibold transition-colors ${
+            sectionTab === 'legal' ? 'bg-[#0D0F0E] text-white' : 'bg-[#F4F6F4] text-[#4A504C] hover:text-[#111312]'
+          }`}
+        >
+          Legal Documentation & Version History
+        </button>
+        <button
+          type="button"
+          onClick={() => setSectionTab('website')}
+          className={`px-4 py-2 rounded-full text-xs font-semibold transition-colors ${
+            sectionTab === 'website' ? 'bg-[#0D0F0E] text-white' : 'bg-[#F4F6F4] text-[#4A504C] hover:text-[#111312]'
+          }`}
+        >
+          Website Sections, FAQs & Email Templates
+        </button>
+      </div>
 
-      {/* Website Sections & Legal Drafts */}
-      <form onSubmit={handleSaveContent} className="rounded-2xl border border-[#E6E8E6] bg-white p-6 space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <h2 className="text-lg font-bold text-[#111312]">Website & Legal Content Editor</h2>
-            <p className="text-xs text-[#5A605C]">
-              Edit homepage copy, company info, divisions, contact info, case studies, and legal drafts without code changes.
-            </p>
-          </div>
-          <select
-            value={selectedKey}
-            onChange={(e) => {
-              const k = e.target.value;
-              setSelectedKey(k);
-              const found = cms.content.find((c) => c.key === k);
-              if (found) {
-                setEditorTitle(found.title);
-                setEditorJson(JSON.stringify(JSON.parse(found.content_json), null, 2));
-              }
-            }}
-            className="px-3.5 py-2 rounded-xl border border-[#D4D8D5] text-xs font-semibold bg-white"
-          >
-            {cms.content.map((c) => (
-              <option key={c.key} value={c.key}>
-                {c.section.toUpperCase()} — {c.title}
-              </option>
-            ))}
-          </select>
-        </div>
+      {sectionTab === 'legal' ? (
+        <AdminLegalEditor />
+      ) : (
+        <>
+          {msg && (
+            <div className="p-3.5 rounded-xl bg-[#E9FAD6] text-[#1D5610] text-xs font-medium flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4" />
+              <span>{msg}</span>
+            </div>
+          )}
+          {err && <div className="p-3.5 rounded-xl bg-red-50 text-red-700 text-xs">{err}</div>}
+
+          {/* Website Sections */}
+          <form onSubmit={handleSaveContent} className="rounded-2xl border border-[#E6E8E6] bg-white p-6 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-bold text-[#111312]">Website Content Editor</h2>
+                <p className="text-xs text-[#5A605C]">
+                  Edit homepage copy, company info, divisions, contact info, and case studies without code changes.
+                </p>
+              </div>
+              <select
+                value={selectedKey}
+                onChange={(e) => {
+                  const k = e.target.value;
+                  setSelectedKey(k);
+                  const found = generalContent.find((c) => c.key === k);
+                  if (found) {
+                    setEditorTitle(found.title);
+                    setEditorJson(JSON.stringify(JSON.parse(found.content_json), null, 2));
+                  }
+                }}
+                className="px-3.5 py-2 rounded-xl border border-[#D4D8D5] text-xs font-semibold bg-white"
+              >
+                {generalContent.map((c) => (
+                  <option key={c.key} value={c.key}>
+                    {c.section.toUpperCase()} — {c.title}
+                  </option>
+                ))}
+              </select>
+            </div>
 
         <div>
           <label className="block text-xs font-semibold mb-1">Section Title</label>
@@ -308,6 +338,8 @@ export function AdminContentManagerView() {
           </div>
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 }

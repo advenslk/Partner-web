@@ -153,6 +153,30 @@ router.post('/register', rateLimit(15, 15 * 60 * 1000), async (req: AuthedReques
     db.prepare(
       `UPDATE partner_applications SET applicant_user_id = ? WHERE lower(contact_email) = ? AND applicant_user_id IS NULL`
     ).run(userId, email);
+
+    const legalDocs = db
+      .prepare(`SELECT key, version FROM legal_documents WHERE key IN ('legal_privacy', 'legal_terms')`)
+      .all() as Array<{ key: string; version: string }>;
+    const acceptStmt = db.prepare(
+      `
+      INSERT INTO legal_acceptances (id, user_id, user_email, organization_name, document_key, document_version, context, ip_address, user_agent)
+      VALUES (?, ?, ?, ?, ?, ?, 'ACCOUNT_REGISTRATION', ?, ?)
+    `
+    );
+    const clientIp = getClientIp(req);
+    const userAgent = String(req.headers['user-agent'] || '').slice(0, 250);
+    for (const ld of legalDocs) {
+      acceptStmt.run(
+        crypto.randomUUID(),
+        userId,
+        email,
+        parsed.data.organizationName || null,
+        ld.key,
+        ld.version,
+        clientIp,
+        userAgent
+      );
+    }
   });
 
   const { rawToken, csrfToken } = createSessionForUser(userId, req);
